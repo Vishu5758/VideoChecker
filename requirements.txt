@@ -2,6 +2,5 @@ streamlit>=1.10.0
 pandas
 matplotlib
 seaborn
-moviepy
 imageio-ffmpeg
 moviepy
