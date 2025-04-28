@@ -226,6 +226,7 @@ def plot_ai_likelihood(results):
         plt.ylabel("Number of Videos")
         buf = BytesIO()
         plt.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)  # Reset buffer position to beginning
         plt.close()
         return buf.getvalue()
     except Exception as e:
@@ -288,15 +289,22 @@ with st.sidebar:
             try:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Error removing temp file: {str(e)}")
         st.session_state.results = []
         st.session_state.selected_video = None
         st.session_state.temp_files = []
         st.rerun()
     
     if st.button("Clean Temporary Files", key="clean_temp"):
-        removed = sum(1 for temp_file in st.session_state.temp_files if os.path.exists(temp_file) and not os.unlink(temp_file))
+        removed = 0
+        for temp_file in st.session_state.temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    removed += 1
+            except Exception as e:
+                logger.error(f"Error removing temp file: {str(e)}")
         st.session_state.temp_files = []
         st.success(f"Cleaned up {removed} temporary files.")
 
@@ -389,7 +397,12 @@ with col1:
                 color = 'background-color: #ffedd5'
             return [color] * len(row)
         
-        styled_df = df.style.apply(highlight_row, axis=1).format(precision=2)
+        styled_df = df.style.apply(highlight_row, axis=1)
+        
+        # Handle DataFrame formatting more carefully to avoid TypeError
+        for col in df.select_dtypes(include=['float64']).columns:
+            styled_df = styled_df.format({col: '{:.2f}'})
+        
         st.markdown('<h2 class="text-xl font-semibold text-gray-700 mb-2">Analysis Results</h2>', unsafe_allow_html=True)
         st.dataframe(styled_df, use_container_width=True, height=400)
         
@@ -406,17 +419,18 @@ with col1:
             st.metric("Likely AI-Generated", f"{ai_high}/{len(st.session_state.results)}")
         
         # AI Likelihood Visualization
-        plot_data = plot_ai_likelihood(st.session_state.results)
-        if plot_data:
-            st.markdown('<h3 class="text-lg font-medium text-gray-600 mt-4">AI Likelihood Distribution</h3>', unsafe_allow_html=True)
-            st.image(plot_data, use_column_width=True)
+        if check_ai:  # Only generate plot if AI checking is enabled
+            plot_data = plot_ai_likelihood(st.session_state.results)
+            if plot_data:
+                st.markdown('<h3 class="text-lg font-medium text-gray-600 mt-4">AI Likelihood Distribution</h3>', unsafe_allow_html=True)
+                st.image(plot_data, use_column_width=True)
         
         # Downloadable Reports
         if generate_report:
             st.markdown('<h3 class="text-lg font-medium text-gray-600 mt-4">Download Reports</h3>', unsafe_allow_html=True)
             timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             csv = df.to_csv(index=False).encode('utf-8')
-            json_data = df.to_json(orient='records', lines=True)
+            json_data = df.to_json(orient='records')  # Changed from lines=True to default
             col_report1, col_report2 = st.columns(2)
             with col_report1:
                 st.download_button(
@@ -439,6 +453,11 @@ with col2:
     st.markdown('<h2 class="text-xl font-semibold text-gray-700 mb-2">Video Details</h2>', unsafe_allow_html=True)
     if st.session_state.results:
         filenames = [r["Filename"] for r in st.session_state.results]
+        
+        # Add safeguard for selected_video
+        if st.session_state.selected_video is None and filenames:
+            st.session_state.selected_video = filenames[0]
+        
         selected_video = st.selectbox(
             "Select Video",
             filenames,
@@ -451,12 +470,16 @@ with col2:
         if video_data:
             temp_path = video_data.get("_temp_path")
             if temp_path and os.path.exists(temp_path):
-                with st.spinner("Loading thumbnail..."):
-                    thumb_data = extract_thumbnail(temp_path)
-                    if thumb_data:
-                        st.image(thumb_data, caption="Video Thumbnail", width=250)
-                    else:
-                        st.warning("Could not load thumbnail.")
+                try:
+                    with st.spinner("Loading thumbnail..."):
+                        thumb_data = extract_thumbnail(temp_path)
+                        if thumb_data:
+                            st.image(thumb_data, caption="Video Thumbnail", width=250)
+                        else:
+                            st.warning("Could not load thumbnail.")
+                except Exception as e:
+                    logger.error(f"Error displaying thumbnail: {str(e)}")
+                    st.warning("Error loading thumbnail.")
             else:
                 st.warning("Video file not found.")
             
@@ -471,7 +494,7 @@ with col2:
                 st.markdown(f"**Framerate:** {video_data['Framerate']}")
                 st.markdown(f"**Created:** {video_data['Creation Date']}")
             
-            if video_data.get("_ai_indicators"):
+            if check_ai and video_data.get("_ai_indicators"):
                 st.markdown('<h3 class="text-lg font-medium text-gray-600 mt-4">🤖 AI Indicators</h3>', unsafe_allow_html=True)
                 for indicator in video_data["_ai_indicators"]:
                     st.markdown(f"- {indicator}")
@@ -504,7 +527,7 @@ st.markdown(f"""
 """)
 
 with st.expander("About This Tool"):
-    st.markdown("""
+    st.markdown(f"""
         ### Cloud Video Prompt Validation Tool
         Analyze video files for compliance with prompt requirements without external dependencies.
         
@@ -526,19 +549,20 @@ def cleanup():
         try:
             if os.path.exists(temp_file):
                 os.unlink(temp_file)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error cleaning up temp file: {str(e)}")
     logger.info("Cleaned up temporary files.")
 
 import atexit
 atexit.register(cleanup)
 
 # Check write access
-if 'has_write_access' not in st.session_state:
+if st.session_state.has_write_access is not True:
     try:
-        with tempfile.TemporaryDirectory():
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with open(os.path.join(temp_dir, "test.txt"), "w") as f:
+                f.write("test")
             st.session_state.has_write_access = True
     except Exception as e:
         st.session_state.has_write_access = False
         st.error(f"Warning: Limited file system access. Error: {str(e)}")
-
