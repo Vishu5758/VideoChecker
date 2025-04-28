@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 MIN_DURATION_DEFAULT = 20  # seconds
 MAX_DURATION_DEFAULT = 30  # seconds
 SUPPORTED_FORMATS = ["mp4", "mov", "avi", "mkv", "webm"]
-MAX_FILE_SIZE_MB = 50  # Maximum file size in MB
+MAX_FILE_SIZE_MB = 500  # Maximum file size in MB
 ALLOWED_RESOLUTIONS = [(1280, 720), (1920, 1080), (3840, 2160)]  # HD, Full HD, 4K
 
 # Check if FFmpeg is available
