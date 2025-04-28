@@ -316,7 +316,13 @@ def analyze_video(video_path, filename):
     # Status checks
     duration_status = "PASS" if (duration and MIN_DURATION <= duration <= MAX_DURATION) else "FAIL"
     audio_status = "FAIL" if has_audio else "PASS"  # FAIL if audio present
-    resolution_check = "HD+" if video_props['width'] and video_props['width'] >= 1280 else "SD"
+    # With this more robust check:
+resolution_check = "HD+" if (
+    video_props['width'] != 'Unknown' and 
+    video_props['width'] != 'Error' and 
+    isinstance(video_props['width'], (int, float)) and 
+    video_props['width'] >= 1280
+) else "SD"
     
     try:
         file_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
