@@ -56,12 +56,32 @@ def check_duration(video_path):
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            st.error(f"FFprobe error: {result.stderr}")
+            return None
+            
         data = json.loads(result.stdout)
-        duration = float(data['format']['duration'])
-        return duration
+        if 'format' in data and 'duration' in data['format']:
+            duration = float(data['format']['duration'])
+            return duration
+        else:
+            st.warning("Duration information not found in video")
+            return None
+    except json.JSONDecodeError:
+        st.error(f"Error parsing JSON output from ffprobe")
+        return None
     except Exception as e:
         st.error(f"Error getting duration: {str(e)}")
         return None
+
+def safe_convert_to_int(value, default='Unknown'):
+    """Safely convert value to int"""
+    if value == 'Unknown' or value == 'Error':
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 def get_video_properties(video_path):
     cmd = [
@@ -75,29 +95,59 @@ def get_video_properties(video_path):
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            return {
+                'width': 'Error',
+                'height': 'Error',
+                'codec': 'Error',
+                'framerate': 'Error',
+                'size_mb': 'Error',
+                'bitrate': 'Error'
+            }
+            
         data = json.loads(result.stdout)
         
         # Extract stream info
         stream_info = data.get('streams', [{}])[0]
-        width = stream_info.get('width', 'Unknown')
-        height = stream_info.get('height', 'Unknown')
+        
+        # Try to convert width and height to integers
+        try:
+            width = int(stream_info.get('width', 0))
+        except (ValueError, TypeError):
+            width = 'Unknown'
+            
+        try:
+            height = int(stream_info.get('height', 0))
+        except (ValueError, TypeError):
+            height = 'Unknown'
+            
         codec = stream_info.get('codec_name', 'Unknown')
         
         # Extract framerate
         r_frame_rate = stream_info.get('r_frame_rate', '0/0')
-        if '/' in r_frame_rate:
-            num, den = map(int, r_frame_rate.split('/'))
-            framerate = round(num / den, 2) if den != 0 else 0
-        else:
-            framerate = float(r_frame_rate)
+        try:
+            if '/' in r_frame_rate:
+                num, den = map(int, r_frame_rate.split('/'))
+                framerate = round(num / den, 2) if den != 0 else 0
+            else:
+                framerate = float(r_frame_rate)
+        except (ValueError, ZeroDivisionError):
+            framerate = 'Unknown'
         
         # Extract format info
         format_info = data.get('format', {})
-        size_bytes = int(format_info.get('size', 0))
-        size_mb = round(size_bytes / (1024 * 1024), 2)
+        try:
+            size_bytes = int(format_info.get('size', 0))
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+        except (ValueError, TypeError):
+            size_mb = 'Unknown'
+            
         bitrate = format_info.get('bit_rate', 'Unknown')
-        if bitrate != 'Unknown':
-            bitrate = f"{round(int(bitrate) / 1000, 2)} Kbps"
+        if bitrate != 'Unknown' and bitrate:
+            try:
+                bitrate = f"{round(int(bitrate) / 1000, 2)} Kbps"
+            except (ValueError, TypeError):
+                bitrate = 'Unknown'
             
         return {
             'width': width,
@@ -107,7 +157,18 @@ def get_video_properties(video_path):
             'size_mb': size_mb,
             'bitrate': bitrate
         }
+    except json.JSONDecodeError:
+        st.error(f"Error parsing JSON from ffprobe")
+        return {
+            'width': 'Error',
+            'height': 'Error',
+            'codec': 'Error',
+            'framerate': 'Error',
+            'size_mb': 'Error',
+            'bitrate': 'Error'
+        }
     except Exception as e:
+        st.error(f"Error getting video properties: {str(e)}")
         return {
             'width': 'Error',
             'height': 'Error',
@@ -128,6 +189,9 @@ def has_audio_stream(video_path):
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            return False, {}
+            
         audio_info = json.loads(result.stdout)
         streams = audio_info.get('streams', [])
         
@@ -135,8 +199,13 @@ def has_audio_stream(video_path):
             stream = streams[0]
             audio_codec = stream.get('codec_name', 'Unknown')
             audio_bitrate = stream.get('bit_rate', 'Unknown')
-            if audio_bitrate != 'Unknown':
-                audio_bitrate = f"{round(int(audio_bitrate) / 1000, 2)} Kbps"
+            
+            if audio_bitrate != 'Unknown' and audio_bitrate:
+                try:
+                    audio_bitrate = f"{round(int(audio_bitrate) / 1000, 2)} Kbps"
+                except (ValueError, TypeError):
+                    audio_bitrate = 'Unknown'
+                    
             audio_sample_rate = stream.get('sample_rate', 'Unknown')
             audio_channels = stream.get('channels', 'Unknown')
             
@@ -147,7 +216,11 @@ def has_audio_stream(video_path):
                 'channels': audio_channels
             }
         return False, {}
+    except json.JSONDecodeError:
+        st.error(f"Error parsing JSON from ffprobe")
+        return False, {}
     except Exception as e:
+        st.error(f"Error checking audio stream: {str(e)}")
         return False, {}
 
 def extract_metadata(video_path):
@@ -160,6 +233,9 @@ def extract_metadata(video_path):
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            return {'raw_metadata': {}, 'error': result.stderr}
+            
         metadata = json.loads(result.stdout)
         tags = metadata.get('format', {}).get('tags', {})
         
@@ -174,7 +250,11 @@ def extract_metadata(video_path):
             'author': author,
             'raw_metadata': tags
         }
+    except json.JSONDecodeError:
+        st.error(f"Error parsing JSON metadata")
+        return {'raw_metadata': {}, 'error': 'JSON parse error'}
     except Exception as e:
+        st.error(f"Error extracting metadata: {str(e)}")
         return {'raw_metadata': {}, 'error': str(e)}
 
 def extract_thumbnail(video_path):
@@ -201,18 +281,29 @@ def extract_thumbnail(video_path):
             temp_filename
         ]
         
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            st.error(f"Error running ffmpeg to extract thumbnail: {result.stderr}")
+            return None
         
         # Read the image and convert to base64
         with open(temp_filename, "rb") as img_file:
             img_data = img_file.read()
             
         # Clean up temp file
-        os.unlink(temp_filename)
+        try:
+            os.unlink(temp_filename)
+        except Exception:
+            pass
         
         return img_data
     except Exception as e:
         st.error(f"Error extracting thumbnail: {str(e)}")
+        if 'temp_filename' in locals():
+            try:
+                os.unlink(temp_filename)
+            except:
+                pass
         return None
 
 def check_ai_indicators(video_path, metadata):
@@ -257,29 +348,39 @@ def check_ai_indicators(video_path, metadata):
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        data = json.loads(result.stdout)
-        streams = data.get('streams', [])
-        
-        if streams:
-            stream = streams[0]
-            codec = stream.get('codec_name', '').lower()
-            bit_rate = stream.get('bit_rate', '')
-            width = stream.get('width', 0)
-            height = stream.get('height', 0)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            streams = data.get('streams', [])
             
-            # Check for perfectly round bitrates (common in AI generation)
-            if bit_rate and bit_rate.isdigit():
-                br = int(bit_rate)
-                if br % 1000000 == 0:
-                    ai_indicators.append(f"Suspiciously round bitrate: {br/1000000}M")
-                    ai_score += 15
-            
-            # Check for unusual resolution/codec combinations
-            if codec == 'h264' and width > 0 and height > 0:
-                # If it's exactly 512x512, 1024x1024, etc. (common in AI)
-                if width == height and (width & (width - 1) == 0):  # Power of 2
-                    ai_indicators.append(f"AI-typical resolution: {width}x{height}")
-                    ai_score += 20
+            if streams:
+                stream = streams[0]
+                codec = stream.get('codec_name', '').lower()
+                bit_rate = stream.get('bit_rate', '')
+                
+                try:
+                    width = int(stream.get('width', 0))
+                    height = int(stream.get('height', 0))
+                except (ValueError, TypeError):
+                    width = height = 0
+                
+                # Check for perfectly round bitrates (common in AI generation)
+                if bit_rate and isinstance(bit_rate, str) and bit_rate.isdigit():
+                    try:
+                        br = int(bit_rate)
+                        if br % 1000000 == 0 and br > 0:
+                            ai_indicators.append(f"Suspiciously round bitrate: {br/1000000}M")
+                            ai_score += 15
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Check for unusual resolution/codec combinations
+                if codec == 'h264' and width > 0 and height > 0:
+                    # If it's exactly 512x512, 1024x1024, etc. (common in AI)
+                    if width == height and width > 0 and (width & (width - 1) == 0):  # Power of 2
+                        ai_indicators.append(f"AI-typical resolution: {width}x{height}")
+                        ai_score += 20
+    except json.JSONDecodeError:
+        pass
     except Exception:
         pass
                 
@@ -310,24 +411,24 @@ def analyze_video(video_path, filename):
     # Calculate file hash for identity verification
     try:
         file_hash = hashlib.md5(open(video_path, 'rb').read(1024*1024)).hexdigest()  # First MB only
-    except Exception:
+    except Exception as e:
         file_hash = "Error"
     
     # Status checks
     duration_status = "PASS" if (duration and MIN_DURATION <= duration <= MAX_DURATION) else "FAIL"
     audio_status = "FAIL" if has_audio else "PASS"  # FAIL if audio present
-    # With this more robust check:
-resolution_check = "HD+" if (
-    video_props['width'] != 'Unknown' and 
-    video_props['width'] != 'Error' and 
-    isinstance(video_props['width'], (int, float)) and 
-    video_props['width'] >= 1280
-) else "SD"
+    
+    # Fix the resolution check to handle non-numeric values
+    width = video_props['width']
+    if isinstance(width, (int, float)) and width >= 1280:
+        resolution_check = "HD+"
+    else:
+        resolution_check = "SD"
     
     try:
         file_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
         file_size_status = "Large" if file_size > 50 else "Medium" if file_size > 10 else "Small"
-    except:
+    except Exception as e:
         file_size = 0
         file_size_status = "Error"
     
@@ -343,7 +444,7 @@ resolution_check = "HD+" if (
                     break
                 except ValueError:
                     continue
-        except:
+        except Exception:
             pass
     
     return {
@@ -353,6 +454,7 @@ resolution_check = "HD+" if (
         "Audio Present": "Yes" if has_audio else "No",
         "Audio Status": audio_status,
         "Resolution": f"{video_props['width']}x{video_props['height']}",
+        "Resolution Check": resolution_check,
         "Codec": video_props['codec'],
         "Framerate": video_props['framerate'],
         "File Size (MB)": video_props['size_mb'],
@@ -378,6 +480,8 @@ if 'selected_video' not in st.session_state:
     st.session_state.selected_video = None
 if 'temp_files' not in st.session_state:
     st.session_state.temp_files = []
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
 
 # Auto-install FFmpeg if needed
 ffmpeg_installed = check_ffmpeg_installed()
@@ -429,30 +533,71 @@ if ffmpeg_installed and ffprobe_installed:
                                         accept_multiple_files=True)
         
         if uploaded_files:
-            if st.button("Analyze Uploaded Videos", key="analyze_btn"):
+            analyze_btn = st.button("Analyze Uploaded Videos", key="analyze_btn", 
+                                   disabled=st.session_state.processing)
+            
+            if analyze_btn:
+                st.session_state.processing = True
+                progress_bar = st.progress(0)
+                
                 with st.spinner(f"Analyzing {len(uploaded_files)} videos..."):
                     new_results = []
                     
                     # Process each uploaded file
-                    for uploaded_file in uploaded_files:
+                    for i, uploaded_file in enumerate(uploaded_files):
                         # Create a temporary file for FFmpeg to work with
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as temp_file:
-                            temp_file.write(uploaded_file.getvalue())
-                            temp_path = temp_file.name
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as temp_file:
+                                temp_file.write(uploaded_file.getvalue())
+                                temp_path = temp_file.name
+                            
+                            # Keep track of temp files to delete later
+                            st.session_state.temp_files.append(temp_path)
+                            
+                            # Analyze the video
+                            with st.status(f"Analyzing {uploaded_file.name}..."):
+                                try:
+                                    result = analyze_video(temp_path, uploaded_file.name)
+                                    new_results.append(result)
+                                except Exception as e:
+                                    st.error(f"Error analyzing {uploaded_file.name}: {str(e)}")
+                                    # Add a placeholder result for failed files
+                                    new_results.append({
+                                        "Filename": uploaded_file.name,
+                                        "Duration (s)": "Error",
+                                        "Duration Status": "FAIL",
+                                        "Audio Present": "Unknown",
+                                        "Audio Status": "Unknown",
+                                        "Resolution": "Error",
+                                        "Resolution Check": "Error",
+                                        "Codec": "Error",
+                                        "Framerate": "Error",
+                                        "File Size (MB)": "Error",
+                                        "Bitrate": "Error",
+                                        "Creation Date": "Unknown",
+                                        "AI Likelihood": "Unknown",
+                                        "File Hash": "Error",
+                                        "Software": "Unknown",
+                                        "_audio_props": {},
+                                        "_ai_indicators": ["Analysis failed: " + str(e)],
+                                        "_metadata": {"raw_metadata": {}},
+                                        "_temp_path": temp_path
+                                    })
+                        except Exception as e:
+                            st.error(f"Error processing {uploaded_file.name}: {str(e)}")
                         
-                        # Keep track of temp files to delete later
-                        st.session_state.temp_files.append(temp_path)
-                        
-                        # Analyze the video
-                        with st.status(f"Analyzing {uploaded_file.name}..."):
-                            result = analyze_video(temp_path, uploaded_file.name)
-                            new_results.append(result)
+                        # Update progress
+                        progress = (i + 1) / len(uploaded_files)
+                        progress_bar.progress(progress)
                     
                     # Add new results to existing ones
                     st.session_state.results.extend(new_results)
                     
                     if not st.session_state.selected_video and new_results:
                         st.session_state.selected_video = new_results[0]["Filename"]
+                
+                st.session_state.processing = False
+                st.experimental_rerun()  # Refresh to update UI
 
         # Display results if we have any
         if st.session_state.results:
@@ -461,51 +606,65 @@ if ffmpeg_installed and ffprobe_installed:
                               "Audio Present", "Audio Status", "Resolution", 
                               "Framerate", "File Size (MB)", "AI Likelihood"]
             
-            df = pd.DataFrame(st.session_state.results)
-            display_df = df[display_columns].copy()
+            # Create a dataframe with safe error handling
+            data_for_df = []
+            for result in st.session_state.results:
+                row = {}
+                for col in display_columns:
+                    row[col] = result.get(col, "Error")
+                data_for_df.append(row)
+            
+            df = pd.DataFrame(data_for_df)
             
             # Highlight rows with issues
             def highlight_row(row):
                 color = ''
-                if row['Duration Status'] == 'FAIL':
+                if row.get('Duration Status') == 'FAIL':
                     color = 'background-color: #ffcccc'
-                if row['Audio Status'] == 'FAIL':
+                if row.get('Audio Status') == 'FAIL':
                     color = 'background-color: #ffffcc'
-                if row['AI Likelihood'] == 'High':
+                if row.get('AI Likelihood') == 'High':
                     color = 'background-color: #ffdddd'
                 return [color] * len(row)
             
-            styled_df = display_df.style.apply(highlight_row, axis=1)
-            st.dataframe(styled_df, use_container_width=True, height=400)
+            try:
+                styled_df = df.style.apply(highlight_row, axis=1)
+                st.dataframe(styled_df, use_container_width=True, height=400)
+            except Exception as e:
+                st.error(f"Error displaying dataframe: {str(e)}")
+                st.dataframe(df, use_container_width=True, height=400)
             
             # Summary statistics
             st.subheader("Summary")
             col_stats1, col_stats2, col_stats3 = st.columns(3)
             
             with col_stats1:
-                pass_count = sum(df['Duration Status'] == 'PASS')
-                st.metric("Valid Duration", f"{pass_count}/{len(df)}")
+                pass_count = sum([1 for r in st.session_state.results if r.get('Duration Status') == 'PASS'])
+                st.metric("Valid Duration", f"{pass_count}/{len(st.session_state.results)}")
                 
             with col_stats2:
-                audio_fail = sum(df['Audio Status'] == 'FAIL')
-                st.metric("With Audio", f"{audio_fail}/{len(df)}")
+                audio_fail = sum([1 for r in st.session_state.results if r.get('Audio Status') == 'FAIL'])
+                st.metric("With Audio", f"{audio_fail}/{len(st.session_state.results)}")
                 
             with col_stats3:
-                ai_high = sum(df['AI Likelihood'] == 'High')
-                st.metric("Likely AI Generated", f"{ai_high}/{len(df)}")
+                ai_high = sum([1 for r in st.session_state.results if r.get('AI Likelihood') == 'High'])
+                st.metric("Likely AI Generated", f"{ai_high}/{len(st.session_state.results)}")
             
             # Save report if requested
             if generate_report:
-                # Create CSV in memory
-                csv = df.to_csv(index=False).encode('utf-8')
-                
-                # Create download button
-                st.download_button(
-                    label="Download CSV Report",
-                    data=csv,
-                    file_name=f"video_analysis_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                )
+                try:
+                    # Create CSV in memory
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    
+                    # Create download button
+                    st.download_button(
+                        label="Download CSV Report",
+                        data=csv,
+                        file_name=f"video_analysis_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+                except Exception as e:
+                    st.error(f"Error generating report: {str(e)}")
                 
         else:
             st.info("Upload videos and click 'Analyze Uploaded Videos' to begin.")
@@ -516,8 +675,13 @@ if ffmpeg_installed and ffprobe_installed:
         if st.session_state.results:
             # Create a selectbox with all video filenames
             filenames = [r["Filename"] for r in st.session_state.results]
-            selected_video = st.selectbox("Select Video", filenames, 
-                                        index=filenames.index(st.session_state.selected_video) if st.session_state.selected_video in filenames else 0)
+            
+            try:
+                selected_index = filenames.index(st.session_state.selected_video) if st.session_state.selected_video in filenames else 0
+            except ValueError:
+                selected_index = 0
+                
+            selected_video = st.selectbox("Select Video", filenames, index=selected_index)
             st.session_state.selected_video = selected_video
             
             # Find the selected video data
@@ -528,28 +692,40 @@ if ffmpeg_installed and ffprobe_installed:
                 try:
                     temp_path = video_data.get("_temp_path")
                     if temp_path and os.path.exists(temp_path):
-                        thumb_data = extract_thumbnail(temp_path)
-                        if thumb_data:
-                            st.image(thumb_data, caption=f"Thumbnail", width=250)
-                        else:
-                            st.warning("Could not load thumbnail")
+                        with st.spinner("Loading thumbnail..."):
+                            thumb_data = extract_thumbnail(temp_path)
+                            if thumb_data:
+                                st.image(thumb_data, caption=f"Thumbnail", width=250)
+                            else:
+                                st.warning("Could not load thumbnail")
+                    else:
+                        st.warning("Video file not found")
                 except Exception as e:
-                    st.warning("Could not load thumbnail")
+                    st.warning(f"Could not load thumbnail: {str(e)}")
                 
-                # Display basic info
-                st.write(f"**Duration:** {video_data['Duration (s)']} seconds")
-                st.write(f"**Resolution:** {video_data['Resolution']}")
-                st.write(f"**Codec:** {video_data['Codec']}")
-                st.write(f"**Created:** {video_data['Creation Date']}")
+                # Display basic info in a more structured way
+                info_col1, info_col2 = st.columns(2)
+                
+                with info_col1:
+                    st.write(f"**Duration:** {video_data['Duration (s)']} seconds")
+                    st.write(f"**Resolution:** {video_data['Resolution']}")
+                    st.write(f"**File Size:** {video_data['File Size (MB)']} MB")
+                
+                with info_col2:
+                    st.write(f"**Codec:** {video_data['Codec']}")
+                    st.write(f"**Framerate:** {video_data['Framerate']}")
+                    st.write(f"**Created:** {video_data['Creation Date']}")
                 
                 # AI indicators
-                if video_data["_ai_indicators"]:
+                if video_data.get("_ai_indicators", []):
                     st.subheader("🤖 AI Indicators")
                     for indicator in video_data["_ai_indicators"]:
                         st.write(f"- {indicator}")
+                else:
+                    st.write("**AI Indicators:** None detected")
                 
                 # Audio details
-                if video_data["Audio Present"] == "Yes" and video_data["_audio_props"]:
+                if video_data.get("Audio Present") == "Yes" and video_data.get("_audio_props", {}):
                     st.subheader("🔊 Audio Properties")
                     audio_props = video_data["_audio_props"]
                     st.write(f"**Codec:** {audio_props.get('codec', 'Unknown')}")
@@ -558,9 +734,13 @@ if ffmpeg_installed and ffprobe_installed:
                     st.write(f"**Channels:** {audio_props.get('channels', 'Unknown')}")
                 
                 # Detailed metadata (collapsible)
-                if extract_full_metadata and video_data["_metadata"].get("raw_metadata"):
+                if extract_full_metadata and video_data.get("_metadata", {}).get("raw_metadata"):
                     with st.expander("Full Metadata"):
-                        st.json(video_data["_metadata"]["raw_metadata"])
+                        try:
+                            st.json(video_data["_metadata"]["raw_metadata"])
+                        except Exception as e:
+                            st.error(f"Error displaying metadata: {str(e)}")
+                            st.write(str(video_data["_metadata"]["raw_metadata"]))
         else:
             st.info("No videos analyzed yet")
 
@@ -584,7 +764,7 @@ if ffmpeg_installed and ffprobe_installed:
         - Video quality and properties
         - Potential AI-generated content markers
         - Metadata and technical specifications
-        
+
         **Usage Instructions:**
         1. Upload your video files using the uploader
         2. Click "Analyze Uploaded Videos"
@@ -614,3 +794,65 @@ try:
     atexit.register(cleanup)
 except:
     pass
+
+# Add error handling for file operations
+def safe_file_operations():
+    # Attempt to create a temporary directory to ensure write permissions
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            st.session_state.temp_dir = temp_dir
+            st.session_state.has_write_access = True
+    except Exception as e:
+        st.session_state.has_write_access = False
+        st.error(f"Warning: Limited file system access. Some features may not work properly. Error: {str(e)}")
+
+# Run this on startup
+if 'has_write_access' not in st.session_state:
+    safe_file_operations()
+
+# Add cache cleanup function
+def clear_temp_files():
+    if st.session_state.temp_files:
+        removed = 0
+        for temp_file in st.session_state.temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    removed += 1
+            except Exception:
+                pass
+        
+        if removed > 0:
+            st.success(f"Cleaned up {removed} temporary files")
+        
+        st.session_state.temp_files = []
+
+# Add this button to the sidebar
+with st.sidebar:
+    if st.button("Clean Temporary Files"):
+        clear_temp_files()
+        
+# Function to handle file upload more robustly
+def process_uploaded_file(uploaded_file):
+    """Process an uploaded file with robust error handling"""
+    try:
+        # Create a temp file with appropriate extension
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as temp_file:
+            temp_file.write(uploaded_file.getvalue())
+            temp_path = temp_file.name
+            
+        # Verify the file exists and is accessible
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+            return None, f"Failed to write temporary file for {uploaded_file.name}"
+            
+        # Verify it's a valid video file
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=format_name", "-of", "json", temp_path]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        if result.returncode != 0:
+            return None, f"Not a valid video file: {uploaded_file.name}"
+            
+        return temp_path, None
+    except Exception as e:
+        return None, f"Error processing {uploaded_file.name}: {str(e)}"
