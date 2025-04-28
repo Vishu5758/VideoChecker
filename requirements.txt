@@ -6,4 +6,4 @@ matplotlib>=3.5.0
 seaborn>=0.12.0
 moviepy>=1.0.3
 imageio-ffmpeg>=0.4.5
-
+ffmpeg-python
