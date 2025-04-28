@@ -4,12 +4,11 @@ import subprocess
 import json
 import pandas as pd
 import datetime
-from moviepy.editor import VideoFileClip
 import hashlib
+import tempfile
+import base64
+from io import BytesIO
 from PIL import Image
-import io
-import numpy as np
-import re
 
 # ----------------------------- SETTINGS -----------------------------
 VIDEO_FOLDER = r"D:\VideoPrompts"  # <-- Change this to your videos folder
@@ -21,12 +20,21 @@ def get_video_files(folder):
     return [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))]
 
 def check_duration(video_path):
+    """Get video duration using ffprobe instead of moviepy"""
+    cmd = [
+        "ffprobe", 
+        "-v", "error", 
+        "-show_entries", "format=duration", 
+        "-of", "json", 
+        video_path
+    ]
     try:
-        clip = VideoFileClip(video_path)
-        duration = clip.duration
-        clip.close()
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout)
+        duration = float(data['format']['duration'])
         return duration
     except Exception as e:
+        st.error(f"Error getting duration: {str(e)}")
         return None
 
 def get_video_properties(video_path):
@@ -74,6 +82,7 @@ def get_video_properties(video_path):
             'bitrate': bitrate
         }
     except Exception as e:
+        st.error(f"Error getting video properties: {str(e)}")
         return {
             'width': 'Error',
             'height': 'Error',
@@ -114,53 +123,73 @@ def has_audio_stream(video_path):
             }
         return False, {}
     except Exception as e:
+        st.error(f"Error checking audio: {str(e)}")
         return False, {}
 
 def extract_metadata(video_path):
     cmd = [
-        "exiftool",
-        "-json",
+        "ffprobe",
+        "-v", "error",
+        "-of", "json",
+        "-show_entries", "format_tags",
         video_path
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            # If exiftool is not installed, use ffprobe instead
-            cmd = [
-                "ffprobe",
-                "-v", "error",
-                "-of", "json",
-                "-show_entries", "format_tags",
-                video_path
-            ]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            metadata = json.loads(result.stdout)
-            tags = metadata.get('format', {}).get('tags', {})
-            
-            # Check for creation date
-            creation_date = tags.get('creation_time', None)
-            software = tags.get('encoder', tags.get('software', None))
-            author = tags.get('artist', tags.get('author', None))
-            
-            return {
-                'creation_date': creation_date,
-                'software': software,
-                'author': author,
-                'raw_metadata': tags
-            }
-        else:
-            metadata = json.loads(result.stdout)
-            if metadata and len(metadata) > 0:
-                md = metadata[0]
-                return {
-                    'creation_date': md.get('CreateDate', None),
-                    'software': md.get('Software', None),
-                    'author': md.get('Author', None),
-                    'raw_metadata': md
-                }
-            return {'raw_metadata': {}}
+        metadata = json.loads(result.stdout)
+        tags = metadata.get('format', {}).get('tags', {})
+        
+        # Check for creation date
+        creation_date = tags.get('creation_time', None)
+        software = tags.get('encoder', tags.get('software', None))
+        author = tags.get('artist', tags.get('author', None))
+        
+        return {
+            'creation_date': creation_date,
+            'software': software,
+            'author': author,
+            'raw_metadata': tags
+        }
     except Exception as e:
         return {'raw_metadata': {}, 'error': str(e)}
+
+def extract_thumbnail(video_path):
+    """Extract thumbnail using ffmpeg instead of moviepy"""
+    try:
+        # Create a temporary file for the thumbnail
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+            temp_filename = temp_file.name
+        
+        # Get video duration first to calculate middle point
+        duration = check_duration(video_path)
+        if not duration:
+            return None
+            
+        # Extract frame from middle of video
+        time_position = duration / 2
+        
+        cmd = [
+            "ffmpeg",
+            "-ss", str(time_position),
+            "-i", video_path,
+            "-vframes", "1",
+            "-q:v", "2",
+            temp_filename
+        ]
+        
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Read the image and convert to base64
+        with open(temp_filename, "rb") as img_file:
+            img_data = img_file.read()
+            
+        # Clean up temp file
+        os.unlink(temp_filename)
+        
+        return img_data
+    except Exception as e:
+        st.error(f"Error extracting thumbnail: {str(e)}")
+        return None
 
 def check_ai_indicators(video_path, metadata):
     """Check for potential AI generation indicators"""
@@ -192,37 +221,44 @@ def check_ai_indicators(video_path, metadata):
                     ai_score += 20
                     break
     
-    # Try to extract a frame and analyze it (simplified)
+    # Check for unusual codec combinations or perfect bitrates
+    # (common in AI-generated content)
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,bit_rate,width,height",
+        "-of", "json",
+        video_path
+    ]
     try:
-        clip = VideoFileClip(video_path)
-        if clip.duration > 0:
-            # Extract middle frame
-            frame = clip.get_frame(clip.duration / 2)
-            clip.close()
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout)
+        streams = data.get('streams', [])
+        
+        if streams:
+            stream = streams[0]
+            codec = stream.get('codec_name', '').lower()
+            bit_rate = stream.get('bit_rate', '')
+            width = stream.get('width', 0)
+            height = stream.get('height', 0)
             
-            # Convert to PIL Image for analysis
-            img = Image.fromarray((frame * 255).astype('uint8'))
+            # Check for perfectly round bitrates (common in AI generation)
+            if bit_rate and bit_rate.isdigit():
+                br = int(bit_rate)
+                if br % 1000000 == 0:
+                    ai_indicators.append(f"Suspiciously round bitrate: {br/1000000}M")
+                    ai_score += 15
             
-            # Check for excessive smoothness (potential AI indicator)
-            img_array = np.array(img)
-            edges = np.std(img_array)
-            
-            if edges < 20:  # Very low edge detail
-                ai_indicators.append("Low detail variation (smooth textures)")
-                ai_score += 15
-            
-            # Hash the middle frame
-            img_hash = hashlib.md5(img.tobytes()).hexdigest()
-            
-            # Here you could compare against known AI model frame signatures
-            # (simplified example)
-            if img_hash.startswith('a') and img_hash.endswith('f'):
-                ai_indicators.append("Frame signature matches known AI pattern")
-                ai_score += 10
-                
-    except Exception as e:
+            # Check for unusual resolution/codec combinations
+            if codec == 'h264' and width > 0 and height > 0:
+                # If it's exactly 512x512, 1024x1024, etc. (common in AI)
+                if width == height and (width & (width - 1) == 0):  # Power of 2
+                    ai_indicators.append(f"AI-typical resolution: {width}x{height}")
+                    ai_score += 20
+    except Exception:
         pass
-    
+                
     # Normalize score to 0-100
     ai_score = min(ai_score, 100)
     
@@ -247,15 +283,22 @@ def analyze_video(video_path):
     ai_check = check_ai_indicators(video_path, metadata)
     
     # Calculate file hash for identity verification
-    file_hash = hashlib.md5(open(video_path, 'rb').read(1024*1024)).hexdigest()  # First MB only
+    try:
+        file_hash = hashlib.md5(open(video_path, 'rb').read(1024*1024)).hexdigest()  # First MB only
+    except Exception:
+        file_hash = "Error"
     
     # Status checks
     duration_status = "PASS" if (duration and MIN_DURATION <= duration <= MAX_DURATION) else "FAIL"
-    audio_status = "FAIL" if has_audio else "PASS"
+    audio_status = "FAIL" if has_audio else "PASS"  # FAIL if audio present
     resolution_check = "HD+" if video_props['width'] and video_props['width'] >= 1280 else "SD"
     
-    file_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
-    file_size_status = "Large" if file_size > 50 else "Medium" if file_size > 10 else "Small"
+    try:
+        file_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
+        file_size_status = "Large" if file_size > 50 else "Medium" if file_size > 10 else "Small"
+    except:
+        file_size = 0
+        file_size_status = "Error"
     
     # Format creation date nicely if available
     creation_date = metadata.get('creation_date', 'Unknown')
@@ -285,7 +328,7 @@ def analyze_video(video_path):
         "Bitrate": video_props['bitrate'],
         "Creation Date": creation_date,
         "AI Likelihood": ai_check['ai_likelihood'],
-        "File Hash": file_hash[:10] + "...",  # Truncated for display
+        "File Hash": file_hash[:10] + "..." if file_hash != "Error" else "Error",
         "Software": metadata.get('software', 'Unknown'),
         "Full Path": video_path,
         # Store additional details for the detailed view
@@ -294,9 +337,72 @@ def analyze_video(video_path):
         "_metadata": metadata
     }
 
+def check_ffmpeg_installed():
+    """Check if ffmpeg is installed and accessible"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except:
+        return False
+
+def check_ffprobe_installed():
+    """Check if ffprobe is installed and accessible"""
+    try:
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except:
+        return False
+
 # ----------------------------- STREAMLIT APP -----------------------------
 st.set_page_config(page_title="Video Prompt Validator", layout="wide")
 st.title("🎥 Advanced Video Prompt Validation Tool")
+
+# Check if ffmpeg/ffprobe are installed
+ffmpeg_installed = check_ffmpeg_installed()
+ffprobe_installed = check_ffprobe_installed()
+
+if not ffmpeg_installed or not ffprobe_installed:
+    st.error("⚠️ Required tools are missing!")
+    missing_tools = []
+    if not ffmpeg_installed:
+        missing_tools.append("ffmpeg")
+    if not ffprobe_installed:
+        missing_tools.append("ffprobe")
+    
+    st.warning(f"This tool requires {', '.join(missing_tools)} to be installed and accessible in your PATH.")
+    
+    with st.expander("Installation Instructions"):
+        st.markdown("""
+        ### How to install required tools:
+        
+        #### Windows:
+        1. Download FFmpeg from [FFmpeg.org](https://ffmpeg.org/download.html) or [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+        2. Extract the zip file
+        3. Add the `bin` folder to your PATH environment variable
+        4. Restart your terminal/command prompt
+        
+        #### macOS:
+        Using Homebrew:
+        ```
+        brew install ffmpeg
+        ```
+        
+        #### Linux:
+        Ubuntu/Debian:
+        ```
+        sudo apt update
+        sudo apt install ffmpeg
+        ```
+        
+        Fedora:
+        ```
+        sudo dnf install ffmpeg
+        ```
+        
+        After installation, restart this application.
+        """)
+    
+    st.stop()
 
 # Sidebar for settings
 with st.sidebar:
@@ -324,8 +430,9 @@ with col1:
                 with st.spinner(f"Analyzing {len(video_files)} videos..."):
                     results = []
                     for video in video_files:
-                        result = analyze_video(video)
-                        results.append(result)
+                        with st.status(f"Analyzing {os.path.basename(video)}..."):
+                            result = analyze_video(video)
+                            results.append(result)
                     
                     # Create DataFrame for display
                     display_columns = ["Filename", "Duration (s)", "Duration Status", 
@@ -336,18 +443,18 @@ with col1:
                     display_df = df[display_columns].copy()
                     
                     # Highlight rows with issues
-                    def highlight_status(s):
-                        styles = [''] * len(s)
-                        if s['Duration Status'] == 'FAIL':
-                            styles = ['background-color: #ffcccc'] * len(s)
-                        if s['Audio Status'] == 'FAIL':
-                            styles = ['background-color: #ffffcc'] * len(s)
-                        if s['AI Likelihood'] == 'High':
-                            styles = ['background-color: #ffdddd'] * len(s)
-                        return styles
+                    def highlight_row(row):
+                        color = ''
+                        if row['Duration Status'] == 'FAIL':
+                            color = 'background-color: #ffcccc'
+                        if row['Audio Status'] == 'FAIL':
+                            color = 'background-color: #ffffcc'
+                        if row['AI Likelihood'] == 'High':
+                            color = 'background-color: #ffdddd'
+                        return [color] * len(row)
                     
-                    st.dataframe(display_df.style.apply(highlight_status, axis=1), 
-                                use_container_width=True, height=400)
+                    styled_df = display_df.style.apply(highlight_row, axis=1)
+                    st.dataframe(styled_df, use_container_width=True, height=400)
                     
                     # Summary statistics
                     st.subheader("Summary")
@@ -389,21 +496,14 @@ with col2:
         video_data = next((r for r in st.session_state.results if r["Filename"] == selected_video), None)
         
         if video_data:
-            # Display thumbnail if possible
+            # Try to extract thumbnail if possible
             try:
                 full_path = video_data["Full Path"]
-                clip = VideoFileClip(full_path)
-                # Get frame from 1 second in or middle if shorter
-                frame_time = min(1.0, clip.duration / 2)
-                frame = clip.get_frame(frame_time)
-                clip.close()
-                
-                # Convert to PIL Image and then to bytes for st.image
-                img = Image.fromarray((frame * 255).astype('uint8'))
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                
-                st.image(buf.getvalue(), caption=f"{selected_video} (Thumbnail)", width=250)
+                thumb_data = extract_thumbnail(full_path)
+                if thumb_data:
+                    st.image(thumb_data, caption=f"{selected_video} (Thumbnail)", width=250)
+                else:
+                    st.warning("Could not load thumbnail")
             except Exception as e:
                 st.warning("Could not load thumbnail")
             
@@ -439,7 +539,29 @@ with col2:
 st.markdown("---")
 st.write("""
 **Notes:**
-- Duration Status: FAIL if outside the specified range
+- Duration Status: FAIL if outside the specified range ({} - {} seconds)
 - Audio Status: FAIL if audio is present (for voiceless video prompts)
 - AI Likelihood: Based on metadata and content analysis
-""")
+""".format(min_duration, max_duration))
+
+# Display instructions for required software
+with st.expander("About This Tool"):
+    st.markdown("""
+    ### Video Prompt Validation Tool
+    
+    This tool helps validate video prompts by analyzing:
+    - Duration requirements
+    - Audio presence/absence
+    - Video quality and properties
+    - Potential AI-generated content markers
+    - Metadata and technical specifications
+    
+    **Requirements:**
+    - FFmpeg and FFprobe installed
+    - Video files in standard formats (MP4, MOV, AVI, MKV)
+    
+    **Validation Criteria:**
+    - Video duration should be between the specified min/max seconds
+    - Videos should not contain audio (for silent prompts)
+    - Videos should meet quality requirements for resolution and bitrate
+    """)
