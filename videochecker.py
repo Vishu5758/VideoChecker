@@ -10,7 +10,9 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-from moviepy.editor import VideoFileClip
+import subprocess
+import json
+import re
 
 # ----------------------------- SETUP -----------------------------
 # Configure logging
@@ -24,97 +26,188 @@ SUPPORTED_FORMATS = ["mp4", "mov", "avi", "mkv", "webm"]
 MAX_FILE_SIZE_MB = 50  # Maximum file size in MB
 ALLOWED_RESOLUTIONS = [(1280, 720), (1920, 1080), (3840, 2160)]  # HD, Full HD, 4K
 
-# ----------------------------- FUNCTIONS -----------------------------
-def check_duration(video_path):
-    """Get video duration using moviepy."""
+# Check if FFmpeg is available
+def is_ffmpeg_available():
     try:
-        with VideoFileClip(video_path) as clip:
-            duration = clip.duration
-        return duration if duration > 0 else None
-    except Exception as e:
-        logger.error(f"Error getting duration for {video_path}: {str(e)}")
-        st.error(f"Error getting duration: {str(e)}")
-        return None
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
 
-def get_video_properties(video_path):
-    """Get video properties using moviepy."""
+# Alternative to moviepy using Python only
+def get_file_info(file_path):
+    """Get basic file information without external dependencies"""
+    file_size = os.path.getsize(file_path)
+    size_mb = file_size / (1024 * 1024)
+    file_ext = os.path.splitext(file_path)[1].lower()
+    
+    # These are dummy values; we'll try to replace them with FFmpeg data if available
+    return {
+        'size_mb': round(size_mb, 2),
+        'format': file_ext.lstrip('.'),
+        'width': 'Unknown',
+        'height': 'Unknown',
+        'duration': None,
+        'framerate': 'Unknown',
+        'has_audio': False,
+        'bitrate': 'Unknown'
+    }
+
+# Use FFmpeg to extract info if available
+def get_ffmpeg_info(file_path):
+    """Extract video information using FFmpeg if available"""
+    if not is_ffmpeg_available():
+        return get_file_info(file_path)
+    
     try:
-        with VideoFileClip(video_path) as clip:
-            width, height = clip.size
-            framerate = clip.fps
-            size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            # Estimate bitrate (approximation: file size / duration)
-            duration = clip.duration
-            bitrate = (size_mb * 8 * 1024) / duration if duration else 'Unknown'  # Kbps
-            codec = 'Unknown'  # moviepy doesn't reliably provide codec
-        return {
-            'width': width,
-            'height': height,
-            'codec': codec,
-            'framerate': round(framerate, 2) if framerate else 'Unknown',
-            'size_mb': round(size_mb, 2),
-            'bitrate': f"{round(bitrate, 2)} Kbps" if isinstance(bitrate, (int, float)) else 'Unknown'
-        }
+        # Run FFprobe to get video information
+        cmd = [
+            'ffprobe', 
+            '-v', 'quiet', 
+            '-print_format', 'json', 
+            '-show_format', 
+            '-show_streams', 
+            file_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        
+        if result.returncode != 0:
+            logger.error(f"FFprobe failed: {result.stderr}")
+            return get_file_info(file_path)
+        
+        data = json.loads(result.stdout)
+        
+        # Initialize with defaults
+        info = get_file_info(file_path)
+        
+        # Get format information
+        if 'format' in data:
+            format_data = data['format']
+            if 'duration' in format_data:
+                info['duration'] = float(format_data['duration'])
+            if 'bit_rate' in format_data:
+                info['bitrate'] = f"{int(format_data['bit_rate']) // 1000} Kbps"
+        
+        # Get video stream information
+        video_stream = None
+        has_audio = False
+        
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video' and not video_stream:
+                video_stream = stream
+            elif stream.get('codec_type') == 'audio':
+                has_audio = True
+        
+        if video_stream:
+            info['width'] = video_stream.get('width', 'Unknown')
+            info['height'] = video_stream.get('height', 'Unknown')
+            
+            # Get framerate
+            if 'r_frame_rate' in video_stream:
+                try:
+                    num, den = map(int, video_stream['r_frame_rate'].split('/'))
+                    info['framerate'] = round(num / den, 2) if den else 'Unknown'
+                except (ValueError, ZeroDivisionError):
+                    info['framerate'] = 'Unknown'
+        
+        info['has_audio'] = has_audio
+        return info
+        
     except Exception as e:
-        logger.error(f"Error getting video properties: {str(e)}")
-        return {
-            'width': 'Error',
-            'height': 'Error',
-            'codec': 'Error',
-            'framerate': 'Error',
-            'size_mb': 'Error',
-            'bitrate': 'Error'
-        }
+        logger.error(f"Error getting FFmpeg info: {str(e)}")
+        return get_file_info(file_path)
 
-def has_audio_stream(video_path):
-    """Check for audio stream using moviepy."""
-    try:
-        with VideoFileClip(video_path) as clip:
-            audio = clip.audio is not None
-            audio_props = {}
-            if audio:
-                audio_props = {
-                    'codec': 'Unknown',  # moviepy doesn't provide audio codec
-                    'bitrate': 'Unknown',
-                    'sample_rate': clip.audio.fps if clip.audio else 'Unknown',
-                    'channels': clip.audio.nchannels if clip.audio else 'Unknown'
-                }
-        return audio, audio_props
-    except Exception as e:
-        logger.error(f"Error checking audio stream: {str(e)}")
-        return False, {}
+def check_duration(file_path):
+    """Get video duration using FFmpeg if available."""
+    info = get_ffmpeg_info(file_path)
+    return info['duration']
 
-def extract_metadata(video_path):
+def get_video_properties(file_path):
+    """Get video properties using FFmpeg."""
+    info = get_ffmpeg_info(file_path)
+    return {
+        'width': info['width'],
+        'height': info['height'],
+        'codec': info.get('format', 'Unknown'),
+        'framerate': info['framerate'],
+        'size_mb': info['size_mb'],
+        'bitrate': info['bitrate']
+    }
+
+def has_audio_stream(file_path):
+    """Check for audio stream."""
+    info = get_ffmpeg_info(file_path)
+    has_audio = info['has_audio']
+    
+    audio_props = {
+        'codec': 'Unknown',
+        'bitrate': 'Unknown',
+        'sample_rate': 'Unknown',
+        'channels': 'Unknown'
+    }
+    
+    return has_audio, audio_props
+
+def extract_metadata(file_path):
     """Extract basic metadata (file-based)."""
     try:
-        creation_time = datetime.datetime.fromtimestamp(os.path.getctime(video_path)).strftime('%Y-%m-%d %H:%M:%S')
+        creation_time = datetime.datetime.fromtimestamp(os.path.getctime(file_path)).strftime('%Y-%m-%d %H:%M:%S')
         return {
             'creation_date': creation_time,
             'software': 'Unknown',
             'author': 'Unknown',
-            'raw_metadata': {'filename': os.path.basename(video_path)}
+            'raw_metadata': {'filename': os.path.basename(file_path)}
         }
     except Exception as e:
         logger.error(f"Error extracting metadata: {str(e)}")
         return {'raw_metadata': {}, 'error': str(e), 'creation_date': 'Unknown', 'software': 'Unknown', 'author': 'Unknown'}
 
-def extract_thumbnail(video_path):
-    """Extract a thumbnail using moviepy."""
+def extract_thumbnail(file_path):
+    """Extract a thumbnail using FFmpeg if available."""
+    if not is_ffmpeg_available():
+        return None
+    
     try:
-        with VideoFileClip(video_path) as clip:
-            duration = clip.duration
-            if not duration:
-                return None
-            frame = clip.get_frame(duration / 2)  # Middle frame
-            img = BytesIO()
-            plt.imsave(img, frame, format='jpg')
-            img.seek(0)
-            return img.read()
+        # Create a temporary file for the thumbnail
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+            temp_thumbnail = temp_file.name
+        
+        # Run FFmpeg to extract a frame from the middle of the video
+        duration = check_duration(file_path)
+        if not duration:
+            return None
+            
+        middle_time = duration / 2
+        cmd = [
+            'ffmpeg',
+            '-ss', str(middle_time),
+            '-i', file_path,
+            '-vframes', '1',
+            '-q:v', '2',
+            temp_thumbnail
+        ]
+        
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        
+        # Read the thumbnail file
+        if os.path.exists(temp_thumbnail) and os.path.getsize(temp_thumbnail) > 0:
+            with open(temp_thumbnail, 'rb') as f:
+                data = f.read()
+            
+            # Clean up temporary file
+            try:
+                os.unlink(temp_thumbnail)
+            except:
+                pass
+                
+            return data
+        
+        return None
     except Exception as e:
         logger.error(f"Error extracting thumbnail: {str(e)}")
         return None
 
-def check_ai_indicators(video_path, metadata, video_props):
+def check_ai_indicators(file_path, metadata, video_props):
     """Check for AI-generated indicators using heuristics."""
     ai_indicators = []
     ai_score = 0
@@ -128,23 +221,36 @@ def check_ai_indicators(video_path, metadata, video_props):
         ai_score += 30
     
     # Check resolution for AI-typical patterns (e.g., power-of-2 sizes)
-    width = video_props.get('width', 0)
-    height = video_props.get('height', 0)
-    if isinstance(width, int) and isinstance(height, int):
+    width = video_props.get('width', 'Unknown')
+    height = video_props.get('height', 'Unknown')
+    
+    # Convert to int if possible
+    try:
+        width = int(width)
+        height = int(height)
+        
         if width == height and width > 0 and (width & (width - 1) == 0):  # Power of 2
             ai_indicators.append(f"AI-typical resolution: {width}x{height}")
             ai_score += 20
         if (width, height) not in ALLOWED_RESOLUTIONS:
             ai_indicators.append(f"Unusual resolution: {width}x{height}")
             ai_score += 15
+    except (ValueError, TypeError):
+        pass
     
     # Check file size anomalies (e.g., suspiciously small for duration)
     size_mb = video_props.get('size_mb', 0)
-    duration = check_duration(video_path)
-    if duration and size_mb and isinstance(size_mb, (int, float)):
-        if size_mb / duration < 0.1:  # Very low MB per second
+    duration = check_duration(file_path)
+    
+    try:
+        size_mb = float(size_mb)
+        duration = float(duration) if duration else 0
+        
+        if duration > 0 and size_mb / duration < 0.1:  # Very low MB per second
             ai_indicators.append("Suspiciously low file size for duration")
             ai_score += 10
+    except (ValueError, TypeError, ZeroDivisionError):
+        pass
     
     ai_score = min(ai_score, 100)
     likelihood = "High" if ai_score > 70 else "Medium" if ai_score > 30 else "Low"
@@ -164,14 +270,22 @@ def analyze_video(video_path, filename):
         audio_status = "FAIL" if has_audio else "PASS"
         
         resolution = f"{video_props['width']}x{video_props['height']}"
-        resolution_check = "HD+" if isinstance(video_props['width'], int) and video_props['width'] >= 1280 else "SD"
         
-        file_size_mb = video_props['size_mb'] if video_props['size_mb'] != 'Error' else 0
+        # Determine resolution check
+        resolution_check = "SD"
+        try:
+            width = int(video_props['width'])
+            if width >= 1280:
+                resolution_check = "HD+"
+        except (ValueError, TypeError):
+            pass
+        
+        file_size_mb = video_props['size_mb']
         file_size_status = "Large" if file_size_mb > 25 else "Medium" if file_size_mb > 5 else "Small"
         
         return {
             "Filename": filename,
-            "Duration (s)": round(duration, 2) if duration else "Error",
+            "Duration (s)": round(duration, 2) if duration else "Unknown",
             "Duration Status": duration_status,
             "Audio Present": "Yes" if has_audio else "No",
             "Audio Status": audio_status,
@@ -236,6 +350,9 @@ def plot_ai_likelihood(results):
 # ----------------------------- STREAMLIT APP -----------------------------
 st.set_page_config(page_title="Video Prompt Validator", layout="wide", initial_sidebar_state="expanded")
 
+# Display FFmpeg status
+ffmpeg_available = is_ffmpeg_available()
+
 # Inject Tailwind CSS for enhanced styling
 st.markdown("""
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
@@ -260,6 +377,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<h1 class="text-3xl font-bold text-gray-800 mb-4">🎥 Video Prompt Validation Tool</h1>', unsafe_allow_html=True)
+
+# FFmpeg status indicator
+if not ffmpeg_available:
+    st.warning("⚠️ FFmpeg is not available. Some features like duration detection and thumbnails will be limited.", icon="⚠️")
 
 # Initialize session state
 if 'results' not in st.session_state:
@@ -400,8 +521,12 @@ with col1:
         styled_df = df.style.apply(highlight_row, axis=1)
         
         # Handle DataFrame formatting more carefully to avoid TypeError
-        for col in df.select_dtypes(include=['float64']).columns:
-            styled_df = styled_df.format({col: '{:.2f}'})
+        number_columns = ["File Size (MB)"]
+        for col in number_columns:
+            try:
+                styled_df = styled_df.format({col: '{:.2f}'}, na_rep="N/A")
+            except:
+                pass
         
         st.markdown('<h2 class="text-xl font-semibold text-gray-700 mb-2">Analysis Results</h2>', unsafe_allow_html=True)
         st.dataframe(styled_df, use_container_width=True, height=400)
@@ -429,8 +554,15 @@ with col1:
         if generate_report:
             st.markdown('<h3 class="text-lg font-medium text-gray-600 mt-4">Download Reports</h3>', unsafe_allow_html=True)
             timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            csv = df.to_csv(index=False).encode('utf-8')
-            json_data = df.to_json(orient='records')  # Changed from lines=True to default
+            
+            # Ensure we only include serializable data
+            export_df = df.fillna("Unknown").replace([np.inf, -np.inf], "Unknown")
+            csv = export_df.to_csv(index=False).encode('utf-8')
+            
+            # Use a simpler approach for JSON to avoid serialization issues
+            json_data = export_df.to_dict(orient='records')
+            json_str = json.dumps(json_data, default=str)
+            
             col_report1, col_report2 = st.columns(2)
             with col_report1:
                 st.download_button(
@@ -443,7 +575,7 @@ with col1:
             with col_report2:
                 st.download_button(
                     label="Download JSON",
-                    data=json_data,
+                    data=json_str,
                     file_name=f"video_analysis_{timestamp}.json",
                     mime="application/json",
                     key="download_json"
@@ -469,7 +601,7 @@ with col2:
         
         if video_data:
             temp_path = video_data.get("_temp_path")
-            if temp_path and os.path.exists(temp_path):
+            if temp_path and os.path.exists(temp_path) and ffmpeg_available:
                 try:
                     with st.spinner("Loading thumbnail..."):
                         thumb_data = extract_thumbnail(temp_path)
@@ -480,6 +612,8 @@ with col2:
                 except Exception as e:
                     logger.error(f"Error displaying thumbnail: {str(e)}")
                     st.warning("Error loading thumbnail.")
+            elif not ffmpeg_available:
+                st.info("Thumbnails require FFmpeg to be installed.")
             else:
                 st.warning("Video file not found.")
             
@@ -529,7 +663,7 @@ st.markdown(f"""
 with st.expander("About This Tool"):
     st.markdown(f"""
         ### Cloud Video Prompt Validation Tool
-        Analyze video files for compliance with prompt requirements without external dependencies.
+        Analyze video files for compliance with prompt requirements.
         
         **Features:**
         - Validates duration, audio presence, and resolution.
@@ -541,6 +675,9 @@ with st.expander("About This Tool"):
         2. Configure settings in the sidebar.
         3. Click "Analyze Videos" to process.
         4. View results and download reports.
+        
+        **Technical Notes:**
+        {"- Using FFmpeg for enhanced video analysis." if ffmpeg_available else "- FFmpeg not available. Using fallback methods."}
     """)
 
 # Cleanup temporary files on session end
