@@ -3,4 +3,4 @@ pandas
 matplotlib
 seaborn
 moviepy
-imageio-ffmpeg  # Required for moviepy video processing
+imageio-ffmpeg
