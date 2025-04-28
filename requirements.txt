@@ -1,9 +1,4 @@
-streamlit
+streamlit>=1.10.0
 pandas
-plotly
-imageio-ffmpeg
-FFmpeg
-streamlit
-pandas
-plotly
-pillow
+matplotlib
+seaborn
