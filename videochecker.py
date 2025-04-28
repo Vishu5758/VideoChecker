@@ -10,7 +10,7 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-from moviepy import VideoFileClip
+from moviepy.editor import VideoFileClip
 
 # ----------------------------- SETUP -----------------------------
 # Configure logging
