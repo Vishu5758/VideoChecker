@@ -9,8 +9,9 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-import subprocess
 import json
+from PIL import Image
+import cv2
 
 # ----------------------------- SETUP -----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -22,53 +23,60 @@ SUPPORTED_FORMATS = ["mp4", "mov", "avi", "mkv", "webm"]
 MAX_FILE_SIZE_MB = 500
 ALLOWED_RESOLUTIONS = [(1280, 720), (1920, 1080), (3840, 2160)]
 
-def is_ffmpeg_available():
+def get_video_info_opencv(path):
+    """Use OpenCV to extract video metadata"""
     try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        return True
-    except FileNotFoundError:
-        return False
-
-def get_ffmpeg_info(path):
-    """Run ffprobe, return dict with duration, width, height, framerate, bitrate, has_audio."""
-    if not is_ffmpeg_available():
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            logger.error(f"Could not open video file: {path}")
+            return {}
+        
+        # Get basic properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Calculate duration
+        duration = frame_count / fps if fps > 0 else None
+        
+        # Check for audio (this is approximate since OpenCV doesn't handle audio well)
+        has_audio = False  # OpenCV can't detect audio, we'll assume none
+        
+        # Calculate bitrate approximately
+        size_bytes = os.path.getsize(path)
+        bitrate = size_bytes * 8 / duration / 1000 if duration else None
+        
+        # Get a thumbnail
+        ret, frame = cap.read()
+        thumbnail = None
+        if ret:
+            # Save the first frame as thumbnail
+            thumbnail_path = f"{path}_thumb.jpg"
+            cv2.imwrite(thumbnail_path, frame)
+            thumbnail = thumbnail_path
+        
+        cap.release()
+        
+        return {
+            "width": width,
+            "height": height,
+            "duration": duration,
+            "framerate": round(fps, 2) if fps else "Unknown",
+            "has_audio": has_audio,
+            "bitrate": f"{int(bitrate) if bitrate else 0} Kbps",
+            "thumbnail": thumbnail
+        }
+    except Exception as e:
+        logger.error(f"Error extracting video info with OpenCV: {e}")
         return {}
-    cmd = [
-        "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        path
-    ]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if res.returncode != 0:
-        logger.error(f"ffprobe error: {res.stderr}")
-        return {}
-    data = json.loads(res.stdout)
-    out = {}
-    fmt = data.get("format", {})
-    if "duration" in fmt:
-        out["duration"] = float(fmt["duration"])
-    if "bit_rate" in fmt:
-        out["bitrate"] = f"{int(fmt['bit_rate'])//1000} Kbps"
-    streams = data.get("streams", [])
-    for s in streams:
-        if s.get("codec_type") == "video":
-            out["width"] = s.get("width")
-            out["height"] = s.get("height")
-            if "r_frame_rate" in s:
-                num, den = map(int, s["r_frame_rate"].split("/"))
-                out["framerate"] = round(num/den, 2) if den else "Unknown"
-        elif s.get("codec_type") == "audio":
-            out["has_audio"] = True
-    return out
 
 def get_file_info(path):
-    """Gather file-size and then overlay any ffprobe info we can."""
+    """Gather file info using OpenCV instead of ffprobe"""
     size_mb = os.path.getsize(path) / (1024*1024)
     ext = os.path.splitext(path)[1].lower().lstrip(".")
+    
+    # Default info
     info = {
         "size_mb": round(size_mb, 2),
         "format": ext,
@@ -76,20 +84,26 @@ def get_file_info(path):
         "height": "Unknown",
         "duration": None,
         "framerate": "Unknown",
-        "has_audio": False,
-        "bitrate": "Unknown"
+        "has_audio": False,  # Assume no audio by default
+        "bitrate": "Unknown",
+        "thumbnail": None
     }
-    ff = get_ffmpeg_info(path)
-    for k in ("width","height","duration","framerate","bitrate","has_audio"):
-        if k in ff:
-            info[k] = ff[k]
+    
+    # Get info from OpenCV
+    cv_info = get_video_info_opencv(path)
+    for k in ("width", "height", "duration", "framerate", "bitrate", "has_audio", "thumbnail"):
+        if k in cv_info and cv_info[k] is not None:
+            info[k] = cv_info[k]
+    
     return info
 
 def extract_metadata(path):
     try:
         ctime = datetime.datetime.fromtimestamp(os.path.getctime(path))
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
         return {
             "creation_date": ctime.strftime("%Y-%m-%d %H:%M:%S"),
+            "modified_date": mtime.strftime("%Y-%m-%d %H:%M:%S"),
             "software": "Unknown",
             "author": "Unknown",
             "raw_metadata": {"filename": os.path.basename(path)}
@@ -99,30 +113,41 @@ def extract_metadata(path):
         return {"creation_date": "Unknown", "software":"Unknown", "author":"Unknown", "raw_metadata":{}}
 
 def extract_thumbnail(path):
-    """Grab a single frame at halfway; return bytes or None."""
-    if not is_ffmpeg_available():
+    """Extract thumbnail using OpenCV instead of ffmpeg"""
+    try:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None
+            
+        # Get video info
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = frame_count / fps if fps > 0 else 0
+        
+        # Jump to middle frame
+        middle_frame = frame_count // 2 if frame_count > 0 else 0
+        cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame)
+        
+        # Read the frame
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            return None
+            
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image and then to bytes
+        pil_img = Image.fromarray(rgb_frame)
+        buf = BytesIO()
+        pil_img.save(buf, format="JPEG")
+        buf.seek(0)
+        return buf.read()
+        
+    except Exception as e:
+        logger.error(f"Thumbnail extraction error: {e}")
         return None
-    info = get_file_info(path)
-    if not info.get("duration"):
-        return None
-    midpoint = info["duration"] / 2
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        thumb_path = tmp.name
-    cmd = [
-        "ffmpeg",
-        "-ss", str(midpoint),
-        "-i", path,
-        "-vframes", "1",
-        "-q:v", "2",
-        thumb_path
-    ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if os.path.exists(thumb_path):
-        with open(thumb_path, "rb") as f:
-            data = f.read()
-        os.unlink(thumb_path)
-        return data
-    return None
 
 def check_ai_indicators(path, md, vp):
     indicators = []
@@ -159,7 +184,7 @@ def analyze_video(path, name):
     dur  = info["duration"] or 0
     has_audio = info["has_audio"]
     duration_status = "PASS" if MIN_DURATION_DEFAULT <= dur <= MAX_DURATION_DEFAULT else "FAIL"
-    audio_status    = "FAIL" if has_audio else "PASS"
+    audio_status    = "PASS"  # Since we can't detect audio, we assume PASS by default
     res = f"{info['width']}×{info['height']}"
     resolution_check = "SD"
     try:
@@ -167,9 +192,9 @@ def analyze_video(path, name):
     except: pass
     return {
         "Filename": name,
-        "Duration (s)": round(dur,2),
+        "Duration (s)": round(dur,2) if dur else "Unknown",
         "Duration Status": duration_status,
-        "Audio Present": "Yes" if has_audio else "No",
+        "Audio Present": "Unknown",  # We can't detect audio with OpenCV
         "Audio Status": audio_status,
         "Resolution": res,
         "Resolution Check": resolution_check,
@@ -183,7 +208,8 @@ def analyze_video(path, name):
         "Software": md["software"],
         "_ai_indicators": ai["ai_indicators"],
         "_metadata": md,
-        "_temp_path": path
+        "_temp_path": path,
+        "_thumbnail": info.get("thumbnail")
     }
 
 def plot_ai_likelihood(results):
@@ -201,8 +227,7 @@ def plot_ai_likelihood(results):
     return buf.getvalue()
 
 # ----------------------------- STREAMLIT APP -----------------------------
-st.set_page_config(page_title="Video Prompt Validator", layout="wide")
-ffmpeg_ok = is_ffmpeg_available()
+st.set_page_config(page_title="Video Prompt Validator (No FFmpeg)", layout="wide")
 
 st.markdown("""
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
@@ -213,9 +238,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="text-3xl font-bold mb-4">🎥 Video Prompt Validation Tool</h1>', unsafe_allow_html=True)
-if not ffmpeg_ok:
-    st.warning("⚠️ FFmpeg/ffprobe not found; feature set will be limited.", icon="⚠️")
+st.markdown('<h1 class="text-3xl font-bold mb-4">🎥 Video Prompt Validation Tool (No FFmpeg)</h1>', unsafe_allow_html=True)
+st.info("This version uses OpenCV instead of FFmpeg. Audio detection is not available.")
 
 # Session state
 if "results" not in st.session_state:
@@ -232,7 +256,11 @@ with st.sidebar:
     gen_report = st.checkbox("Generate Report", True)
     if st.button("Clear All"):
         for f in st.session_state.temp_files:
-            try: os.unlink(f)
+            try: 
+                os.unlink(f)
+                # Also remove any thumbnail files
+                if os.path.exists(f"{f}_thumb.jpg"):
+                    os.unlink(f"{f}_thumb.jpg")
             except: pass
         st.session_state.results.clear()
         st.session_state.temp_files.clear()
@@ -259,18 +287,17 @@ with col1:
                 new.append(analyze_video(path, f.name))
                 prog.progress((i+1)/len(files))
             st.session_state.results.extend(new)
-            if not st.session_state.selected_video:
+            if not st.session_state.selected_video and new:
                 st.session_state.selected_video = new[0]["Filename"]
             st.session_state.processing = False
             st.experimental_rerun()
 
     if st.session_state.results:
-        cols = ["Filename","Duration (s)","Duration Status","Audio Present","Audio Status","Resolution","Framerate","File Size (MB)","AI Likelihood"]
+        cols = ["Filename","Duration (s)","Duration Status","Resolution","Framerate","File Size (MB)","AI Likelihood"]
         df = pd.DataFrame([{c:r.get(c) for c in cols} for r in st.session_state.results])
         def hl(r):
             bg=""
             if r["Duration Status"]=="FAIL": bg="#fee2e2"
-            elif r["Audio Status"]=="FAIL": bg="#fef3c7"
             elif r["AI Likelihood"]=="High": bg="#ffedd5"
             return [bg]*len(r)
         styled = df.style.apply(hl,axis=1)
@@ -278,10 +305,9 @@ with col1:
         st.dataframe(styled, use_container_width=True, height=350)
 
         st.markdown("## Summary")
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Valid Dur", f"{sum(r['Duration Status']=='PASS' for r in st.session_state.results)}/{len(st.session_state.results)}")
-        c2.metric("With Audio", f"{sum(r['Audio Status']=='FAIL' for r in st.session_state.results)}/{len(st.session_state.results)}")
-        c3.metric("Likely AI", f"{sum(r['AI Likelihood']=='High' for r in st.session_state.results)}/{len(st.session_state.results)}")
+        c1,c2 = st.columns(2)
+        c1.metric("Valid Duration", f"{sum(r['Duration Status']=='PASS' for r in st.session_state.results)}/{len(st.session_state.results)}")
+        c2.metric("Likely AI", f"{sum(r['AI Likelihood']=='High' for r in st.session_state.results)}/{len(st.session_state.results)}")
 
         if check_ai:
             img = plot_ai_likelihood(st.session_state.results)
@@ -302,13 +328,19 @@ with col2:
     st.markdown("## Video Details")
     if st.session_state.results:
         names = [r["Filename"] for r in st.session_state.results]
-        sel = st.selectbox("Select Video", names, index=names.index(st.session_state.selected_video))
+        sel = st.selectbox("Select Video", names, index=names.index(st.session_state.selected_video) if st.session_state.selected_video in names else 0)
         st.session_state.selected_video = sel
         vd = next(r for r in st.session_state.results if r["Filename"]==sel)
         tp = vd["_temp_path"]
-        if tp and os.path.exists(tp) and ffmpeg_ok:
+        
+        # Display thumbnail
+        if tp and os.path.exists(tp):
             thumb = extract_thumbnail(tp)
-            if thumb: st.image(thumb, width=250)
+            if thumb: 
+                st.image(thumb, width=250)
+            elif vd.get("_thumbnail") and os.path.exists(vd["_thumbnail"]):
+                st.image(vd["_thumbnail"], width=250)
+                
         for k in ("Duration (s)","Resolution","File Size (MB)","Codec","Framerate","Creation Date"):
             st.markdown(f"**{k}:** {vd.get(k)}")
         if check_ai and vd["_ai_indicators"]:
@@ -317,4 +349,4 @@ with col2:
                 st.markdown(f"- {ind}")
 
 st.markdown("---")
-st.markdown(f"**Criteria:** Duration {MIN_DURATION_DEFAULT}–{MAX_DURATION_DEFAULT}s · No audio · HD+ res")
+st.markdown(f"**Criteria:** Duration {min_dur}–{max_dur}s · HD+ res · AI detection enabled")
