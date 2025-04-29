@@ -265,7 +265,7 @@ with st.sidebar:
         st.session_state.results.clear()
         st.session_state.temp_files.clear()
         st.session_state.selected_video = None
-        st.experimental_rerun()
+        st.rerun()
 
 col1, col2 = st.columns([3,1])
 
@@ -290,7 +290,7 @@ with col1:
             if not st.session_state.selected_video and new:
                 st.session_state.selected_video = new[0]["Filename"]
             st.session_state.processing = False
-            st.experimental_rerun()
+            st.rerun()
 
     if st.session_state.results:
         cols = ["Filename","Duration (s)","Duration Status","Resolution","Framerate","File Size (MB)","AI Likelihood"]
