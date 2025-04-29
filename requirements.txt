@@ -1,6 +1,7 @@
 streamlit>=1.10.0
+opencv-python-headless
 pandas
-numpy
 matplotlib
 seaborn
-opencv-python
+moviepy
+imageio-ffmpeg  # for moviepy video support
